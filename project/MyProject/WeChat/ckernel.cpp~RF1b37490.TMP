@@ -1,0 +1,640 @@
+#include "ckernel.h"
+#include"QDebug"
+#include"QCryptographicHash"
+#include "ui_logindialog.h"
+#include"useritem.h"
+#include "notify.h"
+
+
+#include <QMessageBox>
+#include <QCoreApplication>
+#include <QFileInfo>
+#include <qsettings.h>
+#include <QInputDialog>
+
+#define MD5_KEY "1234"
+
+static QByteArray GetMD5( QString val)
+{
+    QCryptographicHash hash(QCryptographicHash::Md5);
+    QString tmp = QString( "%1_%2").arg(val).arg(MD5_KEY);
+
+    hash.addData( tmp.toStdString().c_str() , strlen(tmp.toStdString().c_str()) );
+    QByteArray  result = hash.result();
+
+    return result.toHex();
+}
+
+#define NetPackMap( a )   m_NetPackMap[ (a) - DEF_PACK_BASE ]
+
+CKernel::CKernel(QObject *parent) : QObject(parent),m_id(0),m_roomid(0)
+{
+    setNetPackMap();
+    m_roomDlg = new RoomDialog;
+    m_weChat = new WeChatDialog;
+    connect( m_weChat , SIGNAL(SIG_close()) , this , SLOT(slot_quit()) );
+    //m_weChat->show();
+    connect( m_weChat , SIGNAL( SIG_systemSet() ) , this , SLOT( slot_systemSet() ) );
+    // meun
+    connect(m_weChat,SIGNAL(SIG_addFriend()),this,SLOT(slot_addFriend()));
+    connect(m_weChat,SIGNAL(SIG_createRoom()),this,SLOT(slot_createRoom()));
+    connect(m_weChat,SIGNAL(SIG_joinRoom(int)),this,SLOT(slot_joinRoom(int)));
+    connect(m_roomDlg,SIGNAL(SIG_leaveRoom(int)),this,SLOT(slot_leaveRoom(int)));
+
+    connect(m_weChat,SIGNAL(SIG_offLine()),this,SLOT(slot_offlineRq()));
+
+
+    m_loginDialog = new LoginDialog;
+    connect( m_loginDialog , SIGNAL(SIG_RegisterCommit(QString,QString))
+             , this , SLOT(slot_RegisterCommit(QString,QString)) );
+    connect( m_loginDialog , SIGNAL(SIG_LoginCommit(QString,QString))
+             , this , SLOT(slot_LoginCommit(QString,QString)) );
+    connect( m_loginDialog , SIGNAL(SIG_close()), this , SLOT(slot_quit()) );
+
+    m_loginDialog->show();
+
+    m_serverIP = "192.168.179.128";
+
+    initConfig();
+    m_tcpClient = new QMyTcpClient;
+    m_tcpClient->setIpAndPort((char *)m_serverIP.toStdString().c_str() , 8000 );
+
+
+    connect( m_tcpClient , SIGNAL(SIG_ReadyData(char*,int))
+             , this , SLOT( slot_dealData(char*,int))  );
+
+    m_setUserDialog = new SetUserDialog;
+    connect( m_setUserDialog , SIGNAL(SIG_setCommit(int,QString,QString))
+             , this ,SLOT( slot_userSetCommit(int,QString,QString)) );
+
+}
+
+void CKernel::slot_systemSet()
+{
+    m_setUserDialog->show();
+}
+
+void CKernel::setNetPackMap()
+{
+    //清空数组
+    memset(m_NetPackMap , 0 , sizeof(m_NetPackMap));
+
+    // m_NetPackMap[ DEF_PACK_LOGIN_RS - DEF_PACK_BASE ] = &CKernel::slot_dealLoginRs;
+    NetPackMap( DEF_PACK_REGISTER_RS)  = &CKernel::slot_dealRegisterRs;
+    NetPackMap( DEF_PACK_LOGIN_RS)     = &CKernel::slot_dealLoginRs;
+    // 好友信息处理
+    NetPackMap( DEF_PACK_FRIEND_INFO)  = &CKernel::slot_dealFriendInfoRq;
+    // 添加好友回复和请求
+    NetPackMap( DEF_PACK_ADD_FRIEND_RQ )  = &CKernel::slot_addFriendRq;
+    NetPackMap( DEF_PACK_ADD_FRIEND_RS )  = &CKernel::slot_addFriendRs;
+    // 下线
+    //NetPackMap( DEF_PACK_ADD_FRIEND_RS )  = &CKernel::slot_dealChatRq;
+    // 处理聊天请求
+    NetPackMap( DEF_PACK_CHAT_RQ )  = &CKernel::slot_dealChatRq;
+    // 下线请求
+    NetPackMap( DEF_PACK_OFFLINRE_RS )  = &CKernel::slot_offLineRs;
+    // 加入房间请求 加入房间回复
+    NetPackMap( DEF_PACK_CREATEROOM_RS )  = &CKernel::slot_createRoomRs;
+    NetPackMap( DEF_PACK_JOINROOM_RS )  = &CKernel::slot_joinRoomRs;
+
+    // 房间内的好友列表
+    NetPackMap( DEF_PACK_ROOM_MEMBER )  = &CKernel::slot_RoomMember;
+}
+void CKernel::slot_quit()
+{
+    DestroyInstance();
+}
+
+void CKernel::DestroyInstance()
+{
+    qDebug()<< __func__;
+    if( m_loginDialog )
+    {
+        m_loginDialog->hide();
+        delete m_loginDialog; m_loginDialog = NULL;
+    }
+    if( m_setUserDialog )
+    {
+        m_setUserDialog->hide();
+        delete m_setUserDialog; m_setUserDialog = NULL;
+    }
+    if( m_weChat )
+    {
+        m_weChat->hide();
+        delete m_weChat; m_weChat = NULL;
+    }
+
+    if( m_tcpClient )
+    {
+        delete m_tcpClient; m_tcpClient = NULL;
+    }
+}
+
+// 处理包的信息
+void CKernel::slot_dealData(char* buf,int nlen)
+{
+    //PackType int
+    int type = *(int*)buf;
+    if( type >= DEF_PACK_BASE && type <  DEF_PACK_BASE +DEF_PACK_COUNT  )
+    {
+        PFUN fun = m_NetPackMap[ type - DEF_PACK_BASE ];
+        if( fun )
+        {
+            (this->*fun)(buf, nlen);
+        }
+    }
+    delete[] buf;
+}
+
+
+//登录回复处理
+void CKernel::slot_dealLoginRs(char *buf, int nlen)
+{
+    //拆包
+    STRU_LOGIN_RS * rs = (STRU_LOGIN_RS *)buf;
+    switch(rs->m_lResult)//根据结果 显示
+    {
+        case userid_no_exist:
+            QMessageBox::about( m_loginDialog , "提示","用户不存在, 登录失败" );
+        break;
+        case password_error:
+            QMessageBox::about( m_loginDialog , "提示","密码错误" );
+        break;
+        case login_sucess:
+            m_loginDialog->hide();
+            m_weChat->show();
+            m_id = rs->m_UserID;
+
+        break;
+    }
+}
+
+//注册回复处理
+void CKernel::slot_dealRegisterRs(char *buf, int nlen)
+{
+    //拆包
+    STRU_REGISTER_RS * rs = (STRU_REGISTER_RS *)buf;
+    switch(rs->m_lResult)//根据结果 显示
+    {
+        case userid_is_exist:
+            QMessageBox::about( m_loginDialog , "提示","用户已存在, 注册失败" );
+        break;
+    case register_sucess:
+            QMessageBox::about( m_loginDialog , "提示","注册成功" );
+            m_loginDialog->getUi()->tw_page->setCurrentIndex( 0 );
+        break;
+    }
+}
+
+//处理好友信息 -- 包括自己
+void CKernel::slot_dealFriendInfoRq(char *buf, int nlen)
+{
+    //拆包
+    STRU_FRIEND_INFO *rq = (STRU_FRIEND_INFO *)buf;
+
+    // 判断是不是自己
+    if( rq->m_userID == m_id)
+    {// 修改自己的信息
+        std::string strName = rq->m_szName;
+        std::string strFeeling = rq->m_feeling;
+        m_weChat->slot_setInfo( rq->m_userID
+                    , QString::fromStdString(strName) ,rq->m_iconID
+                                , QString::fromStdString(strFeeling)  );
+
+        return;
+    }
+    // 好友信息
+    // 首先有没有好友  --> map查找 m_mapUserIDToUserItem
+    if( m_mapUserIDToUserItem.find( rq->m_userID ) != m_mapUserIDToUserItem.end() )
+    {
+        //有好友--更新状态 信息  ...
+        UserItem * item = m_mapUserIDToUserItem[rq->m_userID];
+        if( item->m_state == 0 && rq->m_state ==1)
+        {
+
+            //上线提示
+            Notify *notify = new Notify;
+            notify->setMsg(rq->m_szName,rq->m_userID,QString("[%1]上线了").arg(rq->m_szName));
+            // 点击查看可以蹦出来
+            notify->showAsQQ();
+        }
+        item->slot_setInfo( rq->m_userID,rq->m_szName
+                            , rq->m_state , rq->m_iconID , rq->m_feeling);
+
+    }
+    else
+    {
+        //没有这个  添加到控件  并且到map
+        UserItem * item = new UserItem;
+        item->slot_setInfo( rq->m_userID,rq->m_szName
+                            , rq->m_state , rq->m_iconID , rq->m_feeling);
+
+
+        connect(item , SIGNAL(SIG_itemClicked()) , this ,SLOT(slot_UserItemClicked()));
+        //把用户的聊天窗口全创建出来
+        //聊天窗口 -- connect
+        m_mapUserIDToUserItem[rq->m_userID] = item;
+        //ui显示
+        m_weChat->slot_addUserItem( item );
+
+        //创建聊天的窗口
+        ChatDialog * chat = new ChatDialog;
+        chat->SetInfo(rq->m_userID ,rq->m_szName);
+        connect( chat , SIGNAL(SIG_SendChatMessage(int,QString)) ,
+                this , SLOT( slot_sendMessageRq(int,QString) ) );
+
+        m_mapIDToChatdlg[ rq->m_userID ] = chat;
+    }
+}
+// 添加好友请求
+void CKernel::slot_addFriendRq(char *buf, int nlen)
+{
+    STRU_ADD_FRIEND_RQ *rq = (STRU_ADD_FRIEND_RQ *)buf;
+    QString str = QString("[%1]请求你添加好友，是否同意？").arg(rq->m_szUserName);
+    STRU_ADD_FRIEND_RS rs;
+    rs.m_friendID = m_id;
+    rs.m_userID = rq->m_userID;
+    strcpy(rs.szAddFriendName,rq->m_szAddFriendName);
+    // 如果点击同一
+    if(QMessageBox::question(m_weChat,"添加好友",str) == QMessageBox::Yes)
+    {
+        rs.m_result = add_success;
+    }
+    else
+    {
+        rs.m_result = user_refused;
+    }
+
+
+    m_tcpClient->SendData((char*)&rs,sizeof(rs));
+}
+// 添加好友回复
+void CKernel::slot_addFriendRs(char *buf, int nlen)
+{
+    // 拆包
+    STRU_ADD_FRIEND_RS *rs = (STRU_ADD_FRIEND_RS *)buf;
+    // 拒绝
+    if(rs->m_result == user_refused)
+    {
+        QMessageBox::about(m_weChat,"提示",QString("用户[%1]拒绝添加").arg(rs->szAddFriendName));
+        return ;
+    }
+    // 添加好友成功
+    if(rs->m_result == add_success)
+    {
+        QMessageBox::about(m_weChat,"提示",QString("添加好友[%1]成功").arg(rs->szAddFriendName));
+        return;
+    }
+    // 没有这个好友
+    if(rs->m_result == userid_no_exist)
+    {
+        QMessageBox::about(m_weChat,"提示",QString("用户[%1]不存在").arg(rs->szAddFriendName));
+        return;
+    }
+    // 不在线
+    if(rs->m_result == user_is_offline)
+    {
+        QMessageBox::about(m_weChat,"提示",QString("用户[%1]不在线").arg(rs->szAddFriendName));
+        return;
+    }
+}
+// 处理聊天请求
+void CKernel::slot_dealChatRq(char *buf, int nlen)
+{
+    qDebug()<<__func__;
+    STRU_CHAT_RQ *rq = (STRU_CHAT_RQ *)buf;
+
+    // 遍历找到谁发的
+    if(m_mapIDToChatdlg.find(rq->m_userID)!=m_mapIDToChatdlg.end())
+    {
+        // 创建聊天窗口
+        ChatDialog *chat = m_mapIDToChatdlg[rq->m_userID];
+        // 教习粘贴过来
+        std::string strContent = rq->m_ChatContent;
+
+        chat->slot_recvChatMsg(QString::fromStdString(strContent));
+
+        //提示
+        Notify *nf = new Notify;
+        nf->setMsg( QString("friend") , rq->m_friendID , QString("[ %1 ]\发来一条消息").arg(rq->m_friendID));
+        nf->showAsQQ();
+    }
+
+}
+
+// 处理聊天回复
+void CKernel::slot_dealChatRs(char *buf, int nlen)
+{
+    qDebug()<<__func__;
+    STRU_CHAT_RS *rs = (STRU_CHAT_RS *)buf;
+    // 对方rq->m_friendID
+    //如果离线
+    if(rs->m_result == user_is_offline)
+    {
+        if(m_mapIDToChatdlg.find(rs->m_friendID)!=m_mapIDToChatdlg.end())
+        {
+            // 创建聊天窗口
+            ChatDialog *chat = m_mapIDToChatdlg[rs->m_friendID];
+            // 对方离线
+            chat->slot_showOffline();
+
+
+        }
+    }
+}
+
+//发送注册请求
+void CKernel::slot_RegisterCommit(QString tel, QString password)
+{
+    STRU_REGISTER_RQ rq;
+
+    strcpy(  rq.m_szUser , tel.toStdString().c_str() );
+    QByteArray array = GetMD5( password );
+    memcpy( rq.m_szPassword , array.data() , array.size() );
+
+    qDebug() << rq.m_szPassword ;
+    m_tcpClient->SendData( (char*)&rq , sizeof(rq));
+}
+
+//发送登录请求
+void CKernel::slot_LoginCommit(QString tel, QString password)
+{
+    STRU_LOGIN_RQ rq;
+
+    strcpy(  rq.m_szUser , tel.toStdString().c_str() );
+    QByteArray array = GetMD5( password );
+    memcpy( rq.m_szPassword , array.data() , array.size() );
+
+    qDebug() << rq.m_szPassword ;
+    m_tcpClient->SendData( (char*)&rq , sizeof(rq));
+}
+
+
+//用户设置信息
+void CKernel::slot_userSetCommit(int iconid, QString name, QString feeling)
+{
+    //提交请求包
+    STRU_SET_USER_INFO rq;
+    std::string strName = name.toStdString();
+    std::string strFeeling = feeling.toStdString();
+
+    rq.m_iconid = iconid ;
+    rq.m_UserID = m_id;
+    strcpy( rq.m_name , strName.c_str() );
+    strcpy( rq.m_feeling , strFeeling.c_str() );
+
+    m_tcpClient->SendData( (char*)&rq, sizeof(rq));
+    //setdialog 隐藏
+    m_setUserDialog->hide();
+}
+
+void CKernel::initConfig()
+{
+    // 路径
+    QString path = QCoreApplication::applicationDirPath()+"/config.ini";
+    // 查看是否有这个文件
+    QFileInfo info(path);
+    if(info.exists())
+    {
+        // 有这个文件
+        QSettings setting(path,QSettings::IniFormat,NULL);
+        setting.beginGroup("Net");
+        // 泛型变量
+        QVariant ip = setting.value("IP");
+        setting.endGroup();
+        QString strIP = ip.toString();
+        qDebug() << strIP;
+        if(!strIP.isEmpty())
+        {
+            m_serverIP = strIP;
+        }
+    }
+    else
+    {
+        // 没有这个文件
+        QSettings setting(path,QSettings::IniFormat,NULL);
+        setting.beginGroup("Net");
+        setting.setValue("IP",m_serverIP);
+        setting.endGroup();
+    }
+}
+//添加好友
+void CKernel::slot_addFriend()
+{
+    QString strName = QInputDialog::getText(m_weChat,"添加好友","请输入好友的昵称");
+    // 如果名字为空 或者名字过长
+    if(strName.isEmpty() || strName.length()>20)
+    {
+        QMessageBox::about(m_weChat,"提示","输入昵称非法");
+        return ;
+    }
+    // 名字等于自己的名字
+    if(strName == m_weChat->m_name)
+    {
+        QMessageBox::about(m_weChat,"提示","不能添加自己为好友");
+        return ;
+    }
+
+    // 如果已经是好友了
+    for(auto ite = m_mapUserIDToUserItem.begin();ite != m_mapUserIDToUserItem.end();ite++)
+    {
+        UserItem *item = *ite;
+        if(item->m_name == strName)
+        {
+            QMessageBox::about(m_weChat,"提示","你们已经是好友了");
+            return ;
+        }
+    }
+    // 成功
+    // 发包
+    STRU_ADD_FRIEND_RQ safRQ;
+    safRQ.m_userID = m_id;
+    std::string sName = m_weChat->m_name.toStdString();
+    strcpy(safRQ.m_szUserName , sName.c_str());
+
+    sName = strName.toStdString();
+    strcpy(safRQ.m_szAddFriendName , sName.c_str());
+
+
+    m_tcpClient->SendData((char *)&safRQ , sizeof(safRQ));
+}
+// 创建房间
+void CKernel::slot_createRoom()
+{
+    STRU_CREATEROOM_RQ rq;
+    rq.m_UserID = m_id;
+
+    m_tcpClient->SendData((char*)&rq,sizeof(rq));
+}
+// 加入房间
+void CKernel::slot_joinRoom(int roomid)
+{
+    STRU_JOINROOM_RQ rq;
+    rq.m_RoomID = roomid;
+    rq.m_UserID = m_id;
+
+    m_tcpClient->SendData((char*)&rq,sizeof(rq));
+}
+// 离开房间
+void CKernel::slot_leaveRoom(int id)
+{
+    m_roomid = 0;
+    // 将房间数设置为0
+    m_weChat->m_roomId = m_roomid;
+    STRU_LEAVEROOM_RQ rq;
+    rq.m_RoomId = id;
+    rq.m_nUserId = m_id;
+    // 回收显示
+
+    // 关闭视频 音频设备
+    m_tcpClient->SendData((char*)&rq,sizeof(rq));
+}
+
+// 下线 TODO:
+void CKernel::slot_offLineRs(char *buf, int nlen)
+{
+    qDebug()<<__func__;
+    STRU_OFFLINE_RS *rs = (STRU_OFFLINE_RS *)buf;
+    if( m_mapUserIDToUserItem.find( rs->m_userID ) != m_mapUserIDToUserItem.end() )
+    {
+
+        UserItem* item =   m_mapUserIDToUserItem[rs->m_userID];
+        item->slot_setInfo( item->m_id , item->m_name, 0 ,item->m_iconid);
+
+        //发送离线通知
+        Notify *nf = new Notify;
+        nf->setMsg( item->m_name , item->m_id , QString("[ %1 ]下线了").arg(item->m_name));
+        nf->showAsQQ();
+    }
+}
+
+void CKernel::closeEvent(QCloseEvent *event)
+{
+    // 回收资源
+    //this->slot_dealData();
+
+    event->accept();
+}
+
+// 发送聊天请求 向id的好友发送聊天请求
+void CKernel::slot_sendMessageRq(int id, QString content)
+{
+    STRU_CHAT_RQ rq;
+    rq.m_userID = m_id;
+    rq.m_friendID = id;
+    std::string strContent = content.toStdString();
+    strcpy_s(rq.m_ChatContent ,MAX_CONTENT_LEN , strContent.c_str());
+
+    m_tcpClient->SendData((char*)&rq,sizeof(rq));
+}
+
+//双击用户响应
+void CKernel::slot_UserItemClicked()
+{
+    qDebug()<<__func__;
+
+    UserItem *item = (UserItem *) QObject::sender();
+
+    //聊天窗口显示
+    if(m_mapIDToChatdlg.find( item->m_id ) != m_mapIDToChatdlg.end()  )
+    {
+        ChatDialog *chat = m_mapIDToChatdlg[ item->m_id];
+        //chat->hide();
+        chat->show();
+    }
+}
+// 加入房间回复 （接收到了这个包怎样操作）
+void CKernel::slot_createRoomRs(char *buf, int nlen)
+{
+    STRU_CREATEROOM_RS *rs = (STRU_CREATEROOM_RS*)buf;
+    if(rs->m_lResult == create_success)
+    {
+        m_roomid = rs->m_RoomId;
+        // 设置ui
+        m_roomDlg->slot_setInfo(rs->m_RoomId);
+        // 显示
+        m_roomDlg->show();
+
+        // 添加对自己的video的显示
+        if(m_mapIDtoVideoForm.find(m_id) == m_mapIDtoVideoForm)
+        {
+            VideoForm* form = new VideoForm;
+            form->setInfo(m_id , m_weChat->m_name);
+            connect(form, SIGNAL(SIG_itemClicked(int)),this,SLOT(slot_videoFormClicked(int)));
+
+            m_roomDlg->slot_addVideoform(form);
+            // 加入到链表中
+            m_mapIDtoVideoForm[m_id] = form;
+        }
+        // 音频和视频的添加
+    }
+}
+//创建房间回复
+void CKernel::slot_joinRoomRs(char *buf, int nlen)
+{
+    STRU_CREATEROOM_RS *rs = (STRU_CREATEROOM_RS *)buf;
+
+    m_roomid = rs->m_RoomId;
+    // 设置ui
+    m_roomDlg->slot_setInfo(rs->m_RoomId);
+    // 显示
+    m_roomDlg->show();
+}
+// 右侧略缩图被点击
+void CKernel::slot_videoFormClicked(int)
+{
+    VideoForm *form = (VideoForm*)QObject::sender();
+    m_roomDlg->slot_setBigImageID(m_id , form->m_name);
+}
+// 房间内好友列表
+void CKernel::slot_RoomMember(char *buf, int nlen)
+{
+    //拆包
+    STRU_ROOM_MEMBER_RQ *rq = (STRU_ROOM_MEMBER_RQ *)buf;
+    if(m_mapIDtoVideoForm.find(rq->m_UserID) == m_mapIDtoVideoForm.end())
+    {
+        VideoForm* form = new VideoForm;
+        form->setInfo(rq->m_UserID , rq->m_szUser );
+        connect( form , SIGNAL(SIG_itemClicked(int)) ,
+                this , SLOT(slot_videoItemClicked(int)));
+        //connect( item , &VideoItem::SIG_itemClicked , this , SLOT() );
+        m_roomDlg->slot_addVideoform(form);
+        m_mapIDtoVideoForm[ rq->m_UserID ] = form;
+
+        // 音频
+
+
+    }
+}
+
+
+// 发送离线请求
+void CKernel::slot_offlineRq()
+{
+    qDebug()<<__func__;
+    if(QMessageBox::question( m_weChat, "提示", "是否退出程序") == QMessageBox::Yes)
+    {
+
+         //发送离线请求
+        STRU_OFFLINE_RQ rq;
+        rq.m_userID = m_id;
+
+        m_tcpClient->SendData( (char*)&rq , sizeof(rq));
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
