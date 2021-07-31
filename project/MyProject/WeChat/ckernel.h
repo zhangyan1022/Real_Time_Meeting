@@ -14,7 +14,8 @@
 #include <QMap>
 #include "video_read.h"
 #include "screen_read.h"
-
+#include "encoder.h"
+#include "decoder.h"
 class CKernel;
 typedef void (CKernel::*PFUN)(char* buf, int nlen);
 
@@ -117,7 +118,7 @@ private:
 
     Video_Read *m_pVideoRead;
     Screen_Read *m_pScreenRead;
-
+    encoder *m_encoder;
 };
 
 #endif // CKERNEL_H

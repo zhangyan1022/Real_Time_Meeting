@@ -30,7 +30,7 @@ bqForm::bqForm(QWidget *parent) :
 
        connect(p,SIGNAL(clicked(bool)),this,SLOT(on_Click()));
     }
-//    QWidget::installEventFilter(this);//为这个窗口安装过滤器
+    //    QWidget::installEventFilter(this);   //为这个窗口安装过滤器
 
     setWindowFlags(Qt::Popup) ;
     ui->stackedWidget->setCurrentIndex(0);

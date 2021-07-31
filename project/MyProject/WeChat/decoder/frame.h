@@ -1,21 +1,39 @@
-#ifndef FRAME_H
-#define FRAME_H
+#ifndef FRAMES_H
+#define FRAMES_H
 
-#include <QThread>
-#include <QObject>
-// 编码线程  读取桌面视频的数据
-class frame:public QThread
+#include <QMutex>
+#include <QWaitCondition>
+
+// forward declarations
+typedef struct AVFrame AVFrame;
+
+class Frames
 {
-    Q_OBJECT
 public:
-    explicit frame(QObject *parent = 0);
-public:
-    frame();
-public:
-    void run();
+    Frames();
+    virtual ~Frames();
+
+    bool init();
+    void deInit();
+    void lock();
+    void unLock();
+
+    AVFrame* decodingFrame();
+    bool offerDecodedFrame();
+    const AVFrame* consumeRenderedFrame();
+    void stop();
+
+private:
+    void swap();
+
+private:
+    // 保存正在解码的yuv
+    AVFrame* m_decodingFrame = Q_NULLPTR;
+    // 保存正在渲染的yuv
+    AVFrame* m_renderingframe = Q_NULLPTR;
+    // 保证AVFrame的多线程安全
+    QMutex m_mutex;
+    bool m_renderingFrameConsumed = true;
 };
 
-
-
-
-#endif // FRAME_H
+#endif // FRAMES_H

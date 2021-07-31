@@ -17,6 +17,7 @@
 #include <QByteArray>
 #include <QTime>
 #include "fileitem.h"
+
 #define MD5_KEY "1234"
 static QByteArray GetMD5( QString val)
 {
@@ -722,7 +723,7 @@ void CKernel::slot_leaveRoomRs(char *buf, int nlen)
         form = NULL;
     }
 }
-
+// 发送视频数据
 void CKernel::slot_sendVideoFrame(QImage & img)
 {
     //刷新ui
@@ -732,15 +733,14 @@ void CKernel::slot_sendVideoFrame(QImage & img)
     QByteArray ba;
     QBuffer qbuf(&ba); // QBuffer 与 QByteArray 字节数组联立联系
     img.save( &qbuf , "JPEG" );  //将图片的数据写入 ba
-
-    //发送到服务器
-    //ba.size();
-    ///视频数据帧
-    /// 成员描述
-    /// int type;
-    /// int userId;
-    /// int roomId;
-    /// QByteArray videoFrame;
+    // 发送到服务器;
+    // ba.size();
+    // 视频数据帧
+    // 成员描述;
+    // int type;
+    // int userId;
+    // int roomId;
+    // QByteArray videoFrame;
     char* buf = new char[ 12 + ba.size() ];
     char* tmp = buf;
     int type = DEF_PACK_VIDEO_FRAME;
@@ -756,7 +756,16 @@ void CKernel::slot_sendVideoFrame(QImage & img)
 
     memcpy( tmp , ba.data() , ba.size() );
 
-    m_tcpClient->SendData(buf , (12+ ba.size()) );
+    char* yuvbuf = new char;
+    // rgb转yuv 并且保存到output文件中
+    m_encoder->simplest_rgb24_to_yuv420((char*)tmp,1920,1680,"output.yuv");
+    // 读取yuv 转换到h264
+    m_encoder->simplest_h264_parser("output.yuv");
+
+    // h264封装到 rtp中  端口号8000
+    m_encoder->simplest_rtp_parser(8000);
+    // 发送rtp协议
+    m_tcpClient->SendData((char *)&m_encoder->m_rtpData ,ba.size());
     delete[] buf;
 }
 //刷新界面图片显示
@@ -773,16 +782,16 @@ void CKernel::slot_refreshImage( int id  , QImage& img )
         item->slot_setOneImage(img );
     }
 }
-
+// 发送视频流
 void CKernel::slot_VideoFrame(char *buf, int nlen)
 {
     // buf --> QImage
-    ///视频数据帧
-    /// 成员描述
-    /// int type;
-    /// int userId;
-    /// int roomId;
-    /// QByteArray videoFrame;
+    // 视频数据帧
+    // 成员描述
+    // int type;
+    // int userId;
+    // int roomId;
+    // QByteArray videoFrame;
     char* tmp = buf;
     int type = *(int*)tmp;
     tmp += sizeof(int);

@@ -1,19 +1,51 @@
 #ifndef DECODER_H
 #define DECODER_H
 
-//解码
-#include "libavcodec/avcodec.h"
-//音视频编码器的库 。
-#include "libavformat/avformat.h"
-#include "libswscale/swscale.h"
-//包含了所有的普通音视格式的解析器和产生器的库。
-class decoder
+#include <QThread>
+#include <QPointer>
+#include <QMutex>
+#include "encoder.h"
+#include <frame.h>
+
+extern "C"
 {
+#include "libavcodec/avcodec.h"
+#include "libavformat/avformat.h"
+}
+
+class Frames;
+//class DeviceSocket;
+class Decoder : public QThread
+{
+    Q_OBJECT
 public:
-    decoder();
-    sws_getContext();
+    Decoder();
+    virtual ~Decoder();
+
 public:
-    AVFrame *fram;
+    static bool init();
+    static void deInit();
+
+    void setFrames(Frames* frames);
+    void setDeviceSocket(encoder* deviceSocket);
+    qint32 recvData(quint8* buf, qint32 bufSize);
+    bool startDecode();
+    void stopDecode();
+signals:
+    void onNewFrame();
+    void onDecodeStop();
+
+protected:
+    void run();
+    void pushFrame();
+
+private:
+    // 接收h264数据
+    QPointer<encoder> m_deviceSocket;
+    // 退出标记
+    bool m_quit = false;
+    // 解码出的帧
+    Frames* m_frames;
 };
 
 #endif // DECODER_H

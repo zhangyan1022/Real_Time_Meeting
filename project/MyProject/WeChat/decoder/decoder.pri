@@ -1,17 +1,19 @@
 HEADERS += \
-    $$PWD/decoder.h \
     $$PWD/encoder.h \
-    $$PWD/frame.h
+    $$PWD/frame.h \
+    $$PWD/decoder.h
 
 SOURCES += \
-    $$PWD/decoder.cpp \
+    ##$$PWD/decoder.cpp \
     $$PWD/encoder.cpp \
-    $$PWD/frame.cpp
+    $$PWD/frame.cpp    \
+    $$PWD/decoder.cpp
 
 
 INCLUDEPATH += ./ffmpeg/include
 
-##LIBS += ./ffmpeg/lib -lavformat
-##LIBS += ./ffmpeg/lib -lavcodec
-##LIBS += ./ffmpeg/lib -lavutil
-##LIBS += ./ffmpeg/lib -lswscale
+LIBS += \
+        -L$$PWD/ffmpeg/lib -lavformat \
+        -L$$PWD/ffmpeg/lib -lavcodec \
+        -L$$PWD/ffmpeg/lib -lavutil \
+        -L$$PWD/ffmpeg/lib -lswscale \
